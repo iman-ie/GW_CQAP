@@ -26,10 +26,11 @@ gurobipy
 
 pot (Python Optimal Transport)
 
-Installation
+# Installation
 
 pip install numpy scipy pot
-# For Gurobi (requires license):
+
+For Gurobi (requires license):
 pip install gurobipy
 # Usage
 pythonpython main.py
