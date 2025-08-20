@@ -16,14 +16,19 @@ GA: Genetic Algorithm approach
 
 Exact: Global optimal solution using Gurobi (for small instances)
 
-Requirements
+# Requirements
 
 numpy
+
 scipy
+
 gurobipy
+
 pot (Python Optimal Transport)
+
 Installation
-bashpip install numpy scipy pot
+
+pip install numpy scipy pot
 # For Gurobi (requires license):
 pip install gurobipy
 Usage
