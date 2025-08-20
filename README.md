@@ -31,45 +31,63 @@ Installation
 pip install numpy scipy pot
 # For Gurobi (requires license):
 pip install gurobipy
-Usage
+# Usage
 pythonpython main.py
+
+# 
 The script will:
 
 Generate a random problem instance (agents and tasks with positions and capacities)
+
 Run all optimization methods
+
 Compare computational times and objective values
+
 Display results and performance gaps
 
-Key Features
-Problem Generation
+# Key Features
+# Problem Generation
 
 Random agent/task positions in 2D space
+
 Variable capacities and demands with mass balance
+
 Euclidean distance matrices for cost computation
 
-Optimization Methods
+
+# Optimization Methods
 GW MultiInit Algorithm:
 
 Tries multiple random valid initializations
+
 Uses Sinkhorn projections to ensure constraint satisfaction
+
 Selects best solution across all trials
+
 
 Genetic Algorithm:
 
 Custom implementation with tournament selection
+
 Blend crossover and adaptive mutation
+
 Constraint projection using Sinkhorn iterations
 
 Exact Solution:
 
 Gurobi-based quadratic programming formulation
+
 Global optimality guarantee for small problems
+
 Branch-and-bound with non-convex settings
 
-Results
+# Results
 The code outputs:
 
 Objective values for each method
+
 Computational times
+
 Performance gaps relative to best solution
+
 Best performing method identification
