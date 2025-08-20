@@ -5,12 +5,19 @@ Overview:
 The code compares multiple approaches for solving optimal transport problems:
 
 GW Default: Standard Gromov-Wasserstein with default initialization
+
 GW MultiInit: GW with multiple random initializations
+
 EGW: Entropic Gromov-Wasserstein with various epsilon values
+
 FGW: Fused Gromov-Wasserstein with different alpha parameters
+
 GA: Genetic Algorithm approach
+
 Exact: Global optimal solution using Gurobi (for small instances)
+
 Requirements
+
 numpy
 scipy
 gurobipy
