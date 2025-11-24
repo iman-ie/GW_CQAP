@@ -1,0 +1,395 @@
+import numpy as np
+import ot
+import gurobipy as gp
+from gurobipy import GRB
+from scipy.spatial.distance import cdist
+import time
+
+
+def create_problem(n_agents=6, n_tasks=5, seed=40):
+    np.random.seed(seed)
+    agent_pos = np.random.rand(n_agents, 2) * 10
+    task_pos = np.random.rand(n_tasks, 2) * 10
+    capacities = np.random.randint(2, 5, n_agents).astype(float)
+    demands = np.random.randint(1, 4, n_tasks).astype(float)
+    demands = demands * (capacities.sum() / demands.sum())
+    C1 = cdist(agent_pos, agent_pos)
+    C2 = cdist(task_pos, task_pos)
+    cross_distance = cdist(agent_pos, task_pos)
+    return capacities, demands, C1, C2, cross_distance
+
+
+def solve_exact(mu, nu, C1, C2):
+    """Solve exact with unnormalized"""
+    n_agents, n_tasks = len(mu), len(nu)
+    model = gp.Model()
+    model.setParam('OutputFlag', 0)
+    model.setParam('NonConvex', 2)
+
+    x = model.addVars(n_agents, n_tasks, lb=0)
+
+    for i in range(n_agents):
+        model.addConstr(sum(x[i, j] for j in range(n_tasks)) <= mu[i])
+    for j in range(n_tasks):
+        model.addConstr(sum(x[i, j] for i in range(n_agents)) == nu[j])
+
+    # GW objective with mass normalization
+    obj = gp.QuadExpr()
+    for i in range(n_agents):
+        for j in range(n_agents):
+            for k in range(n_tasks):
+                for l in range(n_tasks):
+                    coeff = (C1[i, j] - C2[k, l]) ** 2
+                    obj += coeff * x[i, k] * x[j, l]
+
+    model.setObjective(obj, GRB.MINIMIZE)
+    model.optimize()
+
+    coupling = np.array([[x[i, j].x for j in range(n_tasks)] for i in range(n_agents)])
+    return coupling, model.objVal
+
+
+def compute_objective(coupling, C1, C2):
+    """Compute GW objective - raw sum without normalization"""
+    n_agents, n_tasks = coupling.shape
+    obj = 0
+
+    for i in range(n_agents):
+        for j in range(n_agents):
+            for k in range(n_tasks):
+                for l in range(n_tasks):
+                    obj += (C1[i, j] - C2[k, l]) ** 2 * coupling[i, k] * coupling[j, l]
+
+    return obj
+
+
+def create_random_coupling(mu_norm, nu_norm, seed=None):
+    """Create a random valid coupling matrix using Sinkhorn iterations"""
+    if seed is not None:
+        np.random.seed(seed)
+
+    n_agents, n_tasks = len(mu_norm), len(nu_norm)
+
+    # Start with random matrix
+    P = np.random.rand(n_agents, n_tasks) + 1e-8  # Small positive values
+
+    # Use Sinkhorn iterations to satisfy marginals exactly
+    for iteration in range(1000):
+        # Row normalization
+        row_sums = P.sum(axis=1, keepdims=True)
+        P = P * (mu_norm.reshape(-1, 1) / row_sums)
+
+        # Column normalization
+        col_sums = P.sum(axis=0, keepdims=True)
+        P = P * (nu_norm.reshape(1, -1) / col_sums)
+
+        # Check convergence
+        if iteration % 100 == 0:
+            row_error = np.max(np.abs(P.sum(axis=1) - mu_norm))
+            col_error = np.max(np.abs(P.sum(axis=0) - nu_norm))
+            if row_error < 1e-12 and col_error < 1e-12:
+                break
+
+    return P
+
+
+def genetic_algorithm_ot_fixed(C1, C2, mu_norm, nu_norm, pop_size=100, generations=500,
+                               crossover_rate=0.8, mutation_rate=0.2, verbose=True):
+    """Fixed Genetic Algorithm for Optimal Transport"""
+
+    n_agents, n_tasks = len(mu_norm), len(nu_norm)
+
+    def project_to_constraints(P):
+        """Project coupling matrix to satisfy marginal constraints using Sinkhorn"""
+        P = np.maximum(P, 1e-12)  # Ensure positivity
+
+        for iteration in range(200):
+            # Row projection
+            row_sums = P.sum(axis=1, keepdims=True)
+            row_sums = np.maximum(row_sums, 1e-12)
+            P = P * (mu_norm.reshape(-1, 1) / row_sums)
+
+            # Column projection
+            col_sums = P.sum(axis=0, keepdims=True)
+            col_sums = np.maximum(col_sums, 1e-12)
+            P = P * (nu_norm.reshape(1, -1) / col_sums)
+
+            # Check convergence
+            if iteration % 50 == 0:
+                row_error = np.max(np.abs(P.sum(axis=1) - mu_norm))
+                col_error = np.max(np.abs(P.sum(axis=0) - nu_norm))
+                if row_error < 1e-10 and col_error < 1e-10:
+                    break
+
+        return P
+
+    def fitness(P):
+        """Compute fitness (negative objective since we minimize)"""
+        # Scale back to original mass
+        P_scaled = P * mu_norm.sum()
+        return -compute_objective(P_scaled, C1, C2)
+
+    # Initialize population with diverse valid couplings
+    population = []
+
+    # Add some structured initializations
+    population.append(np.outer(mu_norm, nu_norm))  # Uniform coupling
+
+    # Add best GW solution if possible
+    try:
+        gw_solution = ot.gromov.gromov_wasserstein(C1, C2, mu_norm, nu_norm, loss_fun='square_loss')
+        population.append(gw_solution)
+    except:
+        pass
+
+    # Fill rest with random valid couplings
+    for i in range(len(population), pop_size):
+        P = create_random_coupling(mu_norm, nu_norm, seed=i * 123)
+        population.append(P)
+
+    # Evolution
+    best_fitness_history = []
+    stagnation_counter = 0
+
+    for generation in range(generations):
+        # Evaluate fitness
+        fitness_scores = [fitness(P) for P in population]
+        best_fitness = max(fitness_scores)
+        best_fitness_history.append(best_fitness)
+
+        # Check for stagnation
+        if generation > 50:
+            recent_improvement = best_fitness_history[-1] - best_fitness_history[-50]
+            if recent_improvement < 1e-8:
+                stagnation_counter += 1
+            else:
+                stagnation_counter = 0
+
+            # Early stopping if stagnated
+            if stagnation_counter > 100:
+                if verbose:
+                    print(f"   Early stopping at generation {generation} due to stagnation")
+                break
+
+        if verbose and generation % 100 == 0:
+            print(f"   Generation {generation}: best fitness = {best_fitness:.6f}")
+
+        # Selection: Tournament selection
+        def tournament_selection(k=3):
+            candidates = np.random.choice(len(population), k, replace=False)
+            best_candidate = max(candidates, key=lambda i: fitness_scores[i])
+            return population[best_candidate]
+
+        new_population = []
+
+        # Elitism: keep top 10%
+        elite_size = max(2, pop_size // 10)
+        elite_indices = np.argsort(fitness_scores)[-elite_size:]
+        for idx in elite_indices:
+            new_population.append(population[idx].copy())
+
+        # Generate offspring
+        while len(new_population) < pop_size:
+            parent1 = tournament_selection()
+            parent2 = tournament_selection()
+
+            # Crossover
+            if np.random.rand() < crossover_rate:
+                # Blend crossover
+                alpha = np.random.uniform(0.3, 0.7)
+                child = alpha * parent1 + (1 - alpha) * parent2
+            else:
+                child = parent1.copy()
+
+            # Mutation
+            if np.random.rand() < mutation_rate:
+                # Adaptive mutation strength based on generation
+                base_strength = 0.1
+                adaptive_strength = base_strength * np.exp(-generation / (generations * 0.3))
+
+                # Add Gaussian noise to random subset of entries
+                mutation_mask = np.random.rand(*child.shape) < 0.3
+                noise = np.random.normal(0, adaptive_strength, child.shape)
+                child += mutation_mask * noise
+
+            # Project to constraints
+            child = project_to_constraints(child)
+            new_population.append(child)
+
+        population = new_population
+
+    # Return best solution
+    final_fitness = [fitness(P) for P in population]
+    best_idx = np.argmax(final_fitness)
+    best_solution = population[best_idx]
+
+    # Validate final solution
+    row_error = np.max(np.abs(best_solution.sum(axis=1) - mu_norm))
+    col_error = np.max(np.abs(best_solution.sum(axis=0) - nu_norm))
+
+    if verbose:
+        print(f"   Final constraint violations: rows={row_error:.2e}, cols={col_error:.2e}")
+        print(f"   Final objective: {-max(final_fitness):.6f}")
+
+    return best_solution
+
+
+def gw_with_random_init(C1, C2, mu_norm, nu_norm, seed=None):
+    """GW with random initialization"""
+    P0 = create_random_coupling(mu_norm, nu_norm, seed)
+
+    return ot.gromov.gromov_wasserstein(
+        C1, C2, mu_norm, nu_norm,
+        loss_fun='square_loss',
+        max_iter=2000,
+        tol=1e-10,
+        G0=P0,
+        verbose=False
+    )
+
+
+def gw_multi_init(C1, C2, mu_norm, nu_norm, n_trials=10):
+    """Try GW with multiple random initializations"""
+    best_obj = float('inf')
+    best_P = None
+
+    # Try default initialization first
+    try:
+        P_default = ot.gromov.gromov_wasserstein(
+            C1, C2, mu_norm, nu_norm,
+            loss_fun='square_loss',
+            max_iter=2000,
+            tol=1e-10
+        )
+        obj_default = compute_objective(P_default * mu_norm.sum(), C1, C2)
+        if obj_default < best_obj:
+            best_obj = obj_default
+            best_P = P_default
+    except:
+        pass
+
+    # Try random initializations
+    for trial in range(n_trials):
+        try:
+            P_trial = gw_with_random_init(C1, C2, mu_norm, nu_norm, seed=trial * 42)
+            obj_trial = compute_objective(P_trial * mu_norm.sum(), C1, C2)
+
+            if obj_trial < best_obj:
+                best_obj = obj_trial
+                best_P = P_trial
+        except Exception as e:
+            continue
+
+    return best_P if best_P is not None else np.outer(mu_norm, nu_norm)
+
+
+def main():
+    mu, nu, C1, C2, cross_distance = create_problem()
+    total_mass = mu.sum()
+    mu_norm = mu / total_mass
+    nu_norm = nu / total_mass
+
+    print(f"Problem: {len(mu)} agents, {len(nu)} tasks")
+    print(f"Total mass = {total_mass:.3f}")
+
+    results = {}
+    times = {}
+
+    # Original GW with default parameters
+    start = time.time()
+    P_gw = ot.gromov.gromov_wasserstein(C1, C2, mu_norm, nu_norm, loss_fun='square_loss')
+    P_gw_scaled = P_gw * total_mass
+    obj_gw = compute_objective(P_gw_scaled, C1, C2)
+    times['GW_Default'] = time.time() - start
+    results['GW_Default'] = obj_gw
+
+    # GW with multiple random initializations
+    start = time.time()
+    P_gw_multi = gw_multi_init(C1, C2, mu_norm, nu_norm, n_trials=15)
+    P_gw_multi_scaled = P_gw_multi * total_mass
+    obj_gw_multi = compute_objective(P_gw_multi_scaled, C1, C2)
+    times['GW_MultiInit'] = time.time() - start
+    results['GW_MultiInit'] = obj_gw_multi
+
+    # Fixed Genetic Algorithm
+    print("\nRunning Fixed GA:")
+    start = time.time()
+    P_ga = genetic_algorithm_ot_fixed(C1, C2, mu_norm, nu_norm, pop_size=80, generations=300,
+                                      crossover_rate=0.8, mutation_rate=0.2, verbose=True)
+    P_ga_scaled = P_ga * total_mass
+    obj_ga = compute_objective(P_ga_scaled, C1, C2)
+    times['GA_Fixed'] = time.time() - start
+    results['GA_Fixed'] = obj_ga
+
+    # EGW with different epsilons (only a few key ones to save time)
+    epsilons = [1, 0.9, 0.8, 0.7, 0.6, 0.5, 0.3]
+    for eps in epsilons:
+        start = time.time()
+        try:
+            P_egw = ot.gromov.entropic_gromov_wasserstein(C1, C2, mu_norm, nu_norm,
+                                                          loss_fun='square_loss', epsilon=eps,
+                                                          max_iter=2000, tol=1e-12)
+            P_egw_scaled = P_egw * total_mass
+            obj_egw = compute_objective(P_egw_scaled, C1, C2)
+
+            # Check if solution is valid
+            if np.isnan(obj_egw) or obj_egw <= 0:
+                print(f"EGW failed for epsilon={eps} (invalid objective)")
+                obj_egw = float('inf')
+
+            times[f'EGW_{eps}'] = time.time() - start
+            results[f'EGW_{eps}'] = obj_egw
+        except Exception as e:
+            print(f"EGW failed for epsilon={eps}: {e}")
+            times[f'EGW_{eps}'] = time.time() - start
+            results[f'EGW_{eps}'] = float('inf')
+
+    # Fused Gromov-Wasserstein with different alpha values
+    alphas = [0.0, 0.3, 0.5, 0.7, 1.0]
+    print(f"\n   Alpha analysis:")
+
+    for alpha in alphas:
+        start = time.time()
+        try:
+            T_fgw, log_fgw = ot.gromov.fused_gromov_wasserstein(
+                cross_distance, C1, C2,
+                mu_norm, nu_norm,
+                loss_fun='square_loss', alpha=alpha, log=True
+            )
+            P_fgw_scaled = T_fgw * total_mass
+            obj_fgw = compute_objective(P_fgw_scaled, C1, C2)
+
+            times[f'FGW_{alpha}'] = time.time() - start
+            results[f'FGW_{alpha}'] = obj_fgw
+
+            print(f"   Alpha {alpha}: objective = {obj_fgw:.6f}, iterations = {log_fgw.get('n_iter', 'N/A')}")
+
+        except Exception as e:
+            print(f"FGW failed for alpha={alpha}: {e}")
+            times[f'FGW_{alpha}'] = time.time() - start
+            results[f'FGW_{alpha}'] = float('inf')
+
+    # Exact
+    start = time.time()
+    P_exact, obj_exact = solve_exact(mu, nu, C1, C2)
+    times['Exact'] = time.time() - start
+    results['Exact'] = obj_exact
+
+    print("\nResults:")
+    for method, obj in results.items():
+        t = times[method]
+        print(f"{method:14}: {obj:.6f} ({t:.3f}s)")
+
+    best_obj = min(results.values())
+    best_method = min(results.items(), key=lambda x: x[1])[0]
+
+    print(f"\nBest method: {best_method} with objective {best_obj:.6f}")
+    print(f"\nGaps from best:")
+    for method, obj in results.items():
+        gap = ((obj / best_obj) - 1) * 100 if best_obj > 0 else float('inf')
+        t = times[method]
+        print(f"{method:14}: {gap:.2f}% ({t:.3f}s)")
+
+
+if __name__ == "__main__":
+    main()
