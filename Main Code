@@ -1,394 +1,908 @@
+"""
+gw_cqap_benchmark.py
+====================
+Interactive GW-based benchmark for QAP / CQAP using QAPLIB instances.
+
+  • QAPLIB .dat files are downloaded AUTOMATICALLY (no manual step needed).
+  • Mode 1 – Simple QAPLIB : standard balanced QAP, GW rounded to permutation.
+  • Mode 2 – Varied QAPLIB : same F,D + random capacities → CQAP formulation.
+
+Usage
+-----
+    python gw_cqap_benchmark.py
+
+Dependencies
+------------
+    pip install numpy scipy POT gurobipy matplotlib pandas
+    (all built-in modules used for downloading — no 'requests' needed)
+"""
+
 import numpy as np
 import ot
 import gurobipy as gp
 from gurobipy import GRB
 from scipy.spatial.distance import cdist
-import time
+from scipy.optimize import linear_sum_assignment
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import pandas as pd
+import urllib.request as _urllib
+import time, os, sys, glob, warnings, textwrap
+warnings.filterwarnings("ignore")
+
+plt.rcParams.update({
+    "font.family":       "DejaVu Sans",
+    "axes.spines.top":   False,
+    "axes.spines.right": False,
+    "axes.grid":         True,
+    "grid.alpha":        0.3,
+    "figure.dpi":        150,
+})
+
+# ── All downloads go here — created automatically ────────────────────────────
+QAPLIB_DATA_DIR = "qaplib_data"
+
+# ── Download mirrors (tried in order) ────────────────────────────────────────
+QAPLIB_URLS = [
+    "https://raw.githubusercontent.com/didoudiaz/QAP-instances/main/QAPLIB/{name}.dat",
+    "https://qaplib.mgi.polymtl.ca/instances/{name}.dat",
+    "https://coral.ise.lehigh.edu/data-sets/qaplib/qaplib-problem-instances-and-solutions/qapdat/{name}.dat",
+]
+
+# ── Colours ──────────────────────────────────────────────────────────────────
+PALETTE = {
+    "GW_Default":   "#2196F3",
+    "GW_MultiInit": "#4CAF50",
+    "EGW_0.3":      "#AB47BC",
+    "EGW_0.5":      "#7B1FA2",
+    "EGW_0.8":      "#4A148C",
+    "FGW_0.3":      "#EF9A9A",
+    "FGW_0.5":      "#E53935",
+    "FGW_0.7":      "#B71C1C",
+    "GA":           "#FF9800",
+    "Exact":        "#212121",
+}
+LABELS = {
+    "GW_Default":   "GW Default",
+    "GW_MultiInit": "GW MultiInit",
+    "EGW_0.3":      "EGW ε=0.3",
+    "EGW_0.5":      "EGW ε=0.5",
+    "EGW_0.8":      "EGW ε=0.8",
+    "FGW_0.3":      "FGW α=0.3",
+    "FGW_0.5":      "FGW α=0.5",
+    "FGW_0.7":      "FGW α=0.7",
+    "GA":           "GA",
+    "Exact":        "Exact",
+}
+APPROX_METHODS = ["GW_Default","GW_MultiInit",
+                  "EGW_0.3","EGW_0.5","EGW_0.8",
+                  "FGW_0.3","FGW_0.5","FGW_0.7","GA"]
+
+# ── Curated instance list (sorted by n) ──────────────────────────────────────
+CURATED_INSTANCES = [
+    "tai10a","nug12","chr12a","tai12a","nug15","chr15a","tai15a",
+    "esc16a","nug17","chr20a","nug20","tai20a","nug25","tai25a",
+    "tai30a","tai35a","tai40a","tai50a",
+]
+
+INSTANCE_N = {
+    "bur26a":26,"bur26b":26,"bur26c":26,"bur26d":26,
+    "bur26e":26,"bur26f":26,"bur26g":26,"bur26h":26,
+    "chr12a":12,"chr12b":12,"chr12c":12,
+    "chr15a":15,"chr15b":15,"chr15c":15,
+    "chr18a":18,"chr18b":18,
+    "chr20a":20,"chr20b":20,"chr20c":20,
+    "chr22a":22,"chr22b":22,"chr25a":25,
+    "els19":19,
+    "esc16a":16,"esc16b":16,"esc16c":16,"esc16d":16,
+    "esc16e":16,"esc16f":16,"esc16g":16,"esc16h":16,"esc16i":16,"esc16j":16,
+    "esc32a":32,"esc32b":32,"esc32c":32,"esc32d":32,"esc32e":32,"esc32g":32,"esc32h":32,
+    "esc64a":64,"esc128":128,
+    "had12":12,"had14":14,"had16":16,"had18":18,"had20":20,
+    "kra30a":30,"kra30b":30,"kra32":32,
+    "lipa20a":20,"lipa20b":20,"lipa30a":30,"lipa30b":30,
+    "lipa40a":40,"lipa40b":40,"lipa50a":50,"lipa50b":50,
+    "lipa60a":60,"lipa60b":60,"lipa70a":70,"lipa70b":70,
+    "lipa80a":80,"lipa80b":80,"lipa90a":90,"lipa90b":90,
+    "nug12":12,"nug14":14,"nug15":15,"nug16a":16,"nug16b":16,
+    "nug17":17,"nug18":18,"nug20":20,"nug21":21,"nug22":22,
+    "nug24":24,"nug25":25,"nug27":27,"nug28":28,"nug30":30,
+    "rou12":12,"rou15":15,"rou20":20,
+    "scr12":12,"scr15":15,"scr20":20,
+    "sko42":42,"sko49":49,"sko56":56,"sko64":64,"sko72":72,
+    "sko81":81,"sko90":90,"sko100a":100,
+    "ste36a":36,"ste36b":36,"ste36c":36,
+    "tai10a":10,"tai10b":10,
+    "tai12a":12,"tai12b":12,
+    "tai15a":15,"tai15b":15,
+    "tai17a":17,
+    "tai20a":20,"tai20b":20,
+    "tai25a":25,"tai25b":25,
+    "tai30a":30,"tai30b":30,
+    "tai35a":35,
+    "tai40a":40,"tai40b":40,
+    "tai50a":50,"tai50b":50,
+    "tai60a":60,"tai60b":60,
+    "tai64c":64,
+    "tai80a":80,"tai80b":80,
+    "tai100a":100,"tai100b":100,
+    "tai150b":150,"tai256c":256,
+    "tho30":30,"tho40":40,"tho150":150,
+    "wil50":50,"wil100":100,
+}
+
+KNOWN_BEST = {
+    "tai10a":135028,"nug12":578,"chr12a":9552,"tai12a":224416,
+    "nug15":1150,"chr15a":9896,"tai15a":388214,"esc16a":68,
+    "nug17":1732,"chr20a":2192,"nug20":2570,"tai20a":703482,
+    "nug25":3744,"tai25a":1167256,"tai30a":1818146,
+    "tai35a":2422002,"tai40a":3139370,"tai50a":4941410,
+}
 
 
-def create_problem(n_agents=6, n_tasks=5, seed=40):
-    np.random.seed(seed)
-    agent_pos = np.random.rand(n_agents, 2) * 10
-    task_pos = np.random.rand(n_tasks, 2) * 10
-    capacities = np.random.randint(2, 5, n_agents).astype(float)
-    demands = np.random.randint(1, 4, n_tasks).astype(float)
-    demands = demands * (capacities.sum() / demands.sum())
-    C1 = cdist(agent_pos, agent_pos)
-    C2 = cdist(task_pos, task_pos)
-    cross_distance = cdist(agent_pos, task_pos)
-    return capacities, demands, C1, C2, cross_distance
+# ════════════════════════════════════════════════════════════════════════════
+# 1. Automatic download
+# ════════════════════════════════════════════════════════════════════════════
+
+def _download_one(name, verbose=False):
+    """
+    Download <name>.dat from QAPLIB mirrors using stdlib urllib.
+    Saves to QAPLIB_DATA_DIR/<name>.dat.  Returns True on success.
+    """
+    os.makedirs(QAPLIB_DATA_DIR, exist_ok=True)
+    dest = os.path.join(QAPLIB_DATA_DIR, f"{name}.dat")
+    if os.path.exists(dest):
+        return True
+    for url_tmpl in QAPLIB_URLS:
+        url = url_tmpl.format(name=name)
+        try:
+            req = _urllib.Request(
+                url, headers={"User-Agent": "Mozilla/5.0 (gw-cqap/1.0)"})
+            with _urllib.urlopen(req, timeout=20) as resp:
+                content = resp.read().decode("utf-8", errors="replace")
+            int(content.strip().split()[0])   # sanity: must start with integer n
+            with open(dest, "w") as fh:
+                fh.write(content)
+            if verbose:
+                print(f"  ↓  {name}.dat")
+            return True
+        except Exception:
+            continue
+    return False
 
 
-def solve_exact(mu, nu, C1, C2):
-    """Solve exact with unnormalized"""
-    n_agents, n_tasks = len(mu), len(nu)
-    model = gp.Model()
-    model.setParam('OutputFlag', 0)
-    model.setParam('NonConvex', 2)
-
-    x = model.addVars(n_agents, n_tasks, lb=0)
-
-    for i in range(n_agents):
-        model.addConstr(sum(x[i, j] for j in range(n_tasks)) <= mu[i])
-    for j in range(n_tasks):
-        model.addConstr(sum(x[i, j] for i in range(n_agents)) == nu[j])
-
-    # GW objective with mass normalization
-    obj = gp.QuadExpr()
-    for i in range(n_agents):
-        for j in range(n_agents):
-            for k in range(n_tasks):
-                for l in range(n_tasks):
-                    coeff = (C1[i, j] - C2[k, l]) ** 2
-                    obj += coeff * x[i, k] * x[j, l]
-
-    model.setObjective(obj, GRB.MINIMIZE)
-    model.optimize()
-
-    coupling = np.array([[x[i, j].x for j in range(n_tasks)] for i in range(n_agents)])
-    return coupling, model.objVal
+def download_instances(names):
+    """
+    Download all requested instances in one go.
+    Prints a compact progress bar and returns the list of successfully
+    downloaded names sorted by n.
+    """
+    print(f"\n  Downloading {len(names)} QAPLIB instances to "
+          f"./{QAPLIB_DATA_DIR}/", end="", flush=True)
+    ok, fail = [], []
+    for name in names:
+        success = _download_one(name)
+        if success:
+            ok.append(name)
+            print(".", end="", flush=True)
+        else:
+            fail.append(name)
+            print("✗", end="", flush=True)
+    print()
+    if fail:
+        print(f"  Could not download: {fail}")
+        print(f"  Manual download:  https://qaplib.mgi.polymtl.ca")
+    ok_sorted = sorted(ok, key=lambda n: INSTANCE_N.get(n, 999))
+    print(f"  {len(ok_sorted)} instances ready.")
+    return ok_sorted
 
 
-def compute_objective(coupling, C1, C2):
-    """Compute GW objective - raw sum without normalization"""
-    n_agents, n_tasks = coupling.shape
-    obj = 0
+# ════════════════════════════════════════════════════════════════════════════
+# 2. QAPLIB file parsing + capacity extension
+# ════════════════════════════════════════════════════════════════════════════
 
-    for i in range(n_agents):
-        for j in range(n_agents):
-            for k in range(n_tasks):
-                for l in range(n_tasks):
-                    obj += (C1[i, j] - C2[k, l]) ** 2 * coupling[i, k] * coupling[j, l]
+def load_qaplib_dat(name):
+    """
+    Parse ./<QAPLIB_DATA_DIR>/<name>.dat  →  (n, F n×n, D n×n).
+    F = flow matrix, D = distance matrix.
+    """
+    path = os.path.join(QAPLIB_DATA_DIR, f"{name}.dat")
+    with open(path) as fh:
+        tokens = fh.read().split()
+    n    = int(tokens[0])
+    vals = list(map(float, tokens[1:]))
+    if len(vals) < 2*n*n:
+        raise ValueError(f"{name}.dat: need {2*n*n} values, got {len(vals)}.")
+    F = np.array(vals[:n*n]).reshape(n, n)
+    D = np.array(vals[n*n:2*n*n]).reshape(n, n)
+    return n, F, D
 
-    return obj
+
+def add_random_capacities(n, F, D, seed=42):
+    """
+    Extend balanced QAP(F,D,n) to CQAP by assigning random integer
+    capacities u_i to facilities and demands d_j to tasks.
+
+        u_i ~ Uniform[2, 5]
+        d_j ~ Uniform[1, 3],  then scaled so Σd = Σu  (balanced)
+
+    Returns:  mu (capacities), nu (demands), C1=F, C2=D, M_feature
+    """
+    rng = np.random.default_rng(seed)
+    u   = rng.integers(2, 6, size=n).astype(float)
+    raw = rng.integers(1, 4, size=n).astype(float)
+    d   = raw * (u.sum() / raw.sum())
+    scale = max(F.max(), D.max(), 1e-12)
+    M     = np.abs(F - D) / scale
+    return u, d, F.copy(), D.copy(), M
 
 
-def create_random_coupling(mu_norm, nu_norm, seed=None):
-    """Create a random valid coupling matrix using Sinkhorn iterations"""
-    if seed is not None:
-        np.random.seed(seed)
+# ════════════════════════════════════════════════════════════════════════════
+# 3. Math utilities
+# ════════════════════════════════════════════════════════════════════════════
 
-    n_agents, n_tasks = len(mu_norm), len(nu_norm)
+def compute_gw_obj(T, C1, C2):
+    mu = T.sum(1); nu = T.sum(0)
+    return float(np.einsum("ij,i,j->", C1**2, mu, mu)
+                 + np.einsum("kl,k,l->", C2**2, nu, nu)
+                 - 2.*np.einsum("kl,kl->", C2, T.T @ C1 @ T))
 
-    # Start with random matrix
-    P = np.random.rand(n_agents, n_tasks) + 1e-8  # Small positive values
 
-    # Use Sinkhorn iterations to satisfy marginals exactly
-    for iteration in range(1000):
-        # Row normalization
-        row_sums = P.sum(axis=1, keepdims=True)
-        P = P * (mu_norm.reshape(-1, 1) / row_sums)
+def compute_qap_obj(F, D, perm):
+    n = len(perm)
+    return float(sum(F[i,j]*D[perm[i],perm[j]]
+                     for i in range(n) for j in range(n)))
 
-        # Column normalization
-        col_sums = P.sum(axis=0, keepdims=True)
-        P = P * (nu_norm.reshape(1, -1) / col_sums)
 
-        # Check convergence
-        if iteration % 100 == 0:
-            row_error = np.max(np.abs(P.sum(axis=1) - mu_norm))
-            col_error = np.max(np.abs(P.sum(axis=0) - nu_norm))
-            if row_error < 1e-12 and col_error < 1e-12:
+def round_to_perm(T):
+    _, col = linear_sum_assignment(-T)
+    return col
+
+
+def _sinkhorn(P, mu, nu, n_iter=800, tol=1e-11):
+    P = np.maximum(P, 1e-9)
+    for it in range(n_iter):
+        P *= mu[:,None] / P.sum(1, keepdims=True)
+        P *= nu[None,:] / P.sum(0, keepdims=True)
+        if it % 100 == 0:
+            if (np.abs(P.sum(1)-mu).max() < tol and
+                    np.abs(P.sum(0)-nu).max() < tol):
                 break
-
     return P
 
 
-def genetic_algorithm_ot_fixed(C1, C2, mu_norm, nu_norm, pop_size=100, generations=500,
-                               crossover_rate=0.8, mutation_rate=0.2, verbose=True):
-    """Fixed Genetic Algorithm for Optimal Transport"""
-
-    n_agents, n_tasks = len(mu_norm), len(nu_norm)
-
-    def project_to_constraints(P):
-        """Project coupling matrix to satisfy marginal constraints using Sinkhorn"""
-        P = np.maximum(P, 1e-12)  # Ensure positivity
-
-        for iteration in range(200):
-            # Row projection
-            row_sums = P.sum(axis=1, keepdims=True)
-            row_sums = np.maximum(row_sums, 1e-12)
-            P = P * (mu_norm.reshape(-1, 1) / row_sums)
-
-            # Column projection
-            col_sums = P.sum(axis=0, keepdims=True)
-            col_sums = np.maximum(col_sums, 1e-12)
-            P = P * (nu_norm.reshape(1, -1) / col_sums)
-
-            # Check convergence
-            if iteration % 50 == 0:
-                row_error = np.max(np.abs(P.sum(axis=1) - mu_norm))
-                col_error = np.max(np.abs(P.sum(axis=0) - nu_norm))
-                if row_error < 1e-10 and col_error < 1e-10:
-                    break
-
-        return P
-
-    def fitness(P):
-        """Compute fitness (negative objective since we minimize)"""
-        # Scale back to original mass
-        P_scaled = P * mu_norm.sum()
-        return -compute_objective(P_scaled, C1, C2)
-
-    # Initialize population with diverse valid couplings
-    population = []
-
-    # Add some structured initializations
-    population.append(np.outer(mu_norm, nu_norm))  # Uniform coupling
-
-    # Add best GW solution if possible
-    try:
-        gw_solution = ot.gromov.gromov_wasserstein(C1, C2, mu_norm, nu_norm, loss_fun='square_loss')
-        population.append(gw_solution)
-    except:
-        pass
-
-    # Fill rest with random valid couplings
-    for i in range(len(population), pop_size):
-        P = create_random_coupling(mu_norm, nu_norm, seed=i * 123)
-        population.append(P)
-
-    # Evolution
-    best_fitness_history = []
-    stagnation_counter = 0
-
-    for generation in range(generations):
-        # Evaluate fitness
-        fitness_scores = [fitness(P) for P in population]
-        best_fitness = max(fitness_scores)
-        best_fitness_history.append(best_fitness)
-
-        # Check for stagnation
-        if generation > 50:
-            recent_improvement = best_fitness_history[-1] - best_fitness_history[-50]
-            if recent_improvement < 1e-8:
-                stagnation_counter += 1
-            else:
-                stagnation_counter = 0
-
-            # Early stopping if stagnated
-            if stagnation_counter > 100:
-                if verbose:
-                    print(f"   Early stopping at generation {generation} due to stagnation")
-                break
-
-        if verbose and generation % 100 == 0:
-            print(f"   Generation {generation}: best fitness = {best_fitness:.6f}")
-
-        # Selection: Tournament selection
-        def tournament_selection(k=3):
-            candidates = np.random.choice(len(population), k, replace=False)
-            best_candidate = max(candidates, key=lambda i: fitness_scores[i])
-            return population[best_candidate]
-
-        new_population = []
-
-        # Elitism: keep top 10%
-        elite_size = max(2, pop_size // 10)
-        elite_indices = np.argsort(fitness_scores)[-elite_size:]
-        for idx in elite_indices:
-            new_population.append(population[idx].copy())
-
-        # Generate offspring
-        while len(new_population) < pop_size:
-            parent1 = tournament_selection()
-            parent2 = tournament_selection()
-
-            # Crossover
-            if np.random.rand() < crossover_rate:
-                # Blend crossover
-                alpha = np.random.uniform(0.3, 0.7)
-                child = alpha * parent1 + (1 - alpha) * parent2
-            else:
-                child = parent1.copy()
-
-            # Mutation
-            if np.random.rand() < mutation_rate:
-                # Adaptive mutation strength based on generation
-                base_strength = 0.1
-                adaptive_strength = base_strength * np.exp(-generation / (generations * 0.3))
-
-                # Add Gaussian noise to random subset of entries
-                mutation_mask = np.random.rand(*child.shape) < 0.3
-                noise = np.random.normal(0, adaptive_strength, child.shape)
-                child += mutation_mask * noise
-
-            # Project to constraints
-            child = project_to_constraints(child)
-            new_population.append(child)
-
-        population = new_population
-
-    # Return best solution
-    final_fitness = [fitness(P) for P in population]
-    best_idx = np.argmax(final_fitness)
-    best_solution = population[best_idx]
-
-    # Validate final solution
-    row_error = np.max(np.abs(best_solution.sum(axis=1) - mu_norm))
-    col_error = np.max(np.abs(best_solution.sum(axis=0) - nu_norm))
-
-    if verbose:
-        print(f"   Final constraint violations: rows={row_error:.2e}, cols={col_error:.2e}")
-        print(f"   Final objective: {-max(final_fitness):.6f}")
-
-    return best_solution
+def augment_slack(C2, nu, mu, M=None):
+    slack = float(mu.sum() - nu.sum())
+    if slack < 1e-10:
+        return (C2, nu, M) if M is not None else (C2, nu)
+    m    = len(nu)
+    C2a  = np.zeros((m+1, m+1)); C2a[:m,:m] = C2
+    nua  = np.append(nu, slack)
+    if M is not None:
+        Ma = np.zeros((len(mu), m+1)); Ma[:,:m] = M; Ma[:,m] = M.mean(1)
+        return C2a, nua, Ma
+    return C2a, nua
 
 
-def gw_with_random_init(C1, C2, mu_norm, nu_norm, seed=None):
-    """GW with random initialization"""
-    P0 = create_random_coupling(mu_norm, nu_norm, seed)
+# ════════════════════════════════════════════════════════════════════════════
+# 4. GW solvers
+# ════════════════════════════════════════════════════════════════════════════
 
+def gw_default(C1, C2, mu_n, nu_n):
     return ot.gromov.gromov_wasserstein(
-        C1, C2, mu_norm, nu_norm,
-        loss_fun='square_loss',
-        max_iter=2000,
-        tol=1e-10,
-        G0=P0,
-        verbose=False
-    )
+        C1, C2, mu_n, nu_n, loss_fun="square_loss",
+        max_iter=2000, tol=1e-10, verbose=False)
 
 
-def gw_multi_init(C1, C2, mu_norm, nu_norm, n_trials=10):
-    """Try GW with multiple random initializations"""
-    best_obj = float('inf')
-    best_P = None
-
-    # Try default initialization first
-    try:
-        P_default = ot.gromov.gromov_wasserstein(
-            C1, C2, mu_norm, nu_norm,
-            loss_fun='square_loss',
-            max_iter=2000,
-            tol=1e-10
-        )
-        obj_default = compute_objective(P_default * mu_norm.sum(), C1, C2)
-        if obj_default < best_obj:
-            best_obj = obj_default
-            best_P = P_default
-    except:
-        pass
-
-    # Try random initializations
-    for trial in range(n_trials):
+def gw_multi_init(C1, C2, mu_n, nu_n, n_trials=10):
+    best_obj = float("inf"); best_T = None
+    total = mu_n.sum()
+    for seed in [None] + list(range(n_trials)):
         try:
-            P_trial = gw_with_random_init(C1, C2, mu_norm, nu_norm, seed=trial * 42)
-            obj_trial = compute_objective(P_trial * mu_norm.sum(), C1, C2)
+            G0 = (None if seed is None else
+                  _sinkhorn(np.random.rand(len(mu_n),len(nu_n))+1e-8, mu_n, nu_n))
+            T  = ot.gromov.gromov_wasserstein(
+                C1, C2, mu_n, nu_n, loss_fun="square_loss",
+                max_iter=2000, tol=1e-10, G0=G0, verbose=False)
+            obj = compute_gw_obj(T*total, C1, C2)
+            if obj < best_obj:
+                best_obj, best_T = obj, T
+        except Exception:
+            pass
+    return best_T if best_T is not None else np.outer(mu_n, nu_n)
 
-            if obj_trial < best_obj:
-                best_obj = obj_trial
-                best_P = P_trial
+
+def genetic_algorithm(C1, C2, mu_n, nu_n, pop_size=80, generations=300):
+    total = mu_n.sum()
+    def fitness(P): return -compute_gw_obj(P*total, C1, C2)
+
+    population = [np.outer(mu_n, nu_n)]
+    try: population.append(gw_default(C1, C2, mu_n, nu_n))
+    except Exception: pass
+    while len(population) < pop_size:
+        np.random.seed(len(population)*7)
+        population.append(_sinkhorn(
+            np.random.rand(len(mu_n),len(nu_n))+1e-8, mu_n, nu_n))
+
+    best_hist = []; stagnation = 0
+    for gen in range(generations):
+        scores = [fitness(P) for P in population]
+        best_hist.append(max(scores))
+        if gen > 50:
+            stagnation = stagnation+1 if best_hist[-1]-best_hist[-50]<1e-8 else 0
+            if stagnation > 80: break
+        def tour(k=3):
+            idx = np.random.choice(len(population), k, replace=False)
+            return population[max(idx, key=lambda ii: scores[ii])]
+        elite_n = max(2, pop_size//10)
+        new_pop = [population[i].copy() for i in np.argsort(scores)[-elite_n:]]
+        while len(new_pop) < pop_size:
+            p1, p2 = tour(), tour()
+            a = np.random.uniform(0.3, 0.7)
+            child = a*p1 + (1-a)*p2 if np.random.rand() < 0.8 else p1.copy()
+            if np.random.rand() < 0.2:
+                s = 0.1*np.exp(-gen/(generations*0.3))
+                mask = np.random.rand(*child.shape) < 0.3
+                child += mask*np.random.normal(0, s, child.shape)
+            new_pop.append(_sinkhorn(child, mu_n, nu_n))
+        population = new_pop
+    scores = [fitness(P) for P in population]
+    return population[np.argmax(scores)]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 5. Exact solvers (Gurobi)
+# ════════════════════════════════════════════════════════════════════════════
+
+def solve_exact_qap(n, F, D, time_limit=7200):
+    """
+    Exact QAP via Gurobi binary MIQP.
+    min Σᵢₖⱼₗ F[i,k]·D[j,l]·x_ij·x_kl,   x ∈ {0,1}^{n×n}
+    Returns (best_obj, time_used, is_optimal).
+    """
+    t0 = time.time()
+    try:
+        m = gp.Model(); m.setParam("OutputFlag",0)
+        m.setParam("NonConvex",2); m.setParam("TimeLimit",time_limit)
+        x = m.addVars(n, n, vtype=GRB.BINARY)
+        for i in range(n): m.addConstr(sum(x[i,j] for j in range(n)) == 1)
+        for j in range(n): m.addConstr(sum(x[i,j] for i in range(n)) == 1)
+        obj = gp.QuadExpr()
+        for i in range(n):
+            for k in range(n):
+                for j in range(n):
+                    for l in range(n):
+                        if F[i,k] != 0 and D[j,l] != 0:
+                            obj += F[i,k]*D[j,l]*x[i,j]*x[k,l]
+        m.setObjective(obj, GRB.MINIMIZE); m.optimize()
+        elapsed = time.time()-t0
+        if m.SolCount > 0:
+            return m.objVal, elapsed, (m.Status == GRB.OPTIMAL)
+    except Exception as e:
+        print(f"    Gurobi error: {e}")
+    return None, time.time()-t0, False
+
+
+def solve_exact_cqap(mu, nu, C1, C2, time_limit=7200):
+    """
+    Exact CQAP via Gurobi continuous MIQP (GW objective + capacity constraints).
+    Returns (best_obj, time_used, is_optimal).
+    """
+    n, mt = len(mu), len(nu)
+    t0 = time.time()
+    try:
+        m = gp.Model(); m.setParam("OutputFlag",0)
+        m.setParam("NonConvex",2); m.setParam("TimeLimit",time_limit)
+        x = m.addVars(n, mt, lb=0.0, ub=1.0)
+        for i in range(n):  m.addConstr(sum(x[i,j] for j in range(mt)) <= mu[i])
+        for j in range(mt): m.addConstr(sum(x[i,j] for i in range(n))  == nu[j])
+        obj = gp.QuadExpr()
+        for i in range(n):
+            for k in range(n):
+                for j in range(mt):
+                    for l in range(mt):
+                        coef = (C1[i,k]-C2[j,l])**2
+                        if abs(coef) > 1e-12:
+                            obj += coef * x[i,j]*x[k,l]
+        m.setObjective(obj, GRB.MINIMIZE); m.optimize()
+        elapsed = time.time()-t0
+        if m.SolCount > 0:
+            return m.objVal, elapsed, (m.Status == GRB.OPTIMAL)
+    except Exception as e:
+        print(f"    Gurobi error: {e}")
+    return None, time.time()-t0, False
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 6. Two-phase benchmark
+# ════════════════════════════════════════════════════════════════════════════
+
+def run_benchmark(names, mode, n_gw_trials=10,
+                  epsilons=(0.3, 0.5, 0.8),
+                  alphas=(0.3, 0.5, 0.7),
+                  exact_time_limit=7200,
+                  capacity_seed=42):
+    """
+    Two-phase benchmark on QAPLIB instances.
+
+    Phase 1 – All approximate methods on every instance.
+    Phase 2 – Exact (Gurobi), per-instance limit = exact_time_limit.
+              Once one instance exceeds the limit all remaining → NA.
+
+    mode = "simple"  : standard QAP (GW rounded to permutation)
+    mode = "varied"  : CQAP (random capacities added to QAPLIB instance)
+    """
+
+    # ── build problem data ────────────────────────────────────────────────
+    problems = []
+    for name in names:
+        try:
+            n, F, D = load_qaplib_dat(name)
         except Exception as e:
+            print(f"  [SKIP] {name}: {e}"); continue
+
+        if mode == "simple":
+            mu = np.ones(n); nu = np.ones(n)
+            C1, C2, M = F, D, np.abs(F-D)/max(F.max(),D.max(),1e-12)
+        else:
+            mu, nu, C1, C2, M = add_random_capacities(n, F, D, seed=capacity_seed)
+
+        total   = mu.sum()
+        C2a, nua, Ma = augment_slack(C2, nu, mu, M)
+        mu_n    = mu/total
+        nu_n    = nua/total
+        m_tasks = len(nu)   # original (non-augmented) task count
+        problems.append(dict(name=name, n=n, F=F, D=D,
+                             mu=mu, nu=nu, C1=C1, C2a=C2a, Ma=Ma,
+                             mu_n=mu_n, nu_n=nu_n, m_tasks=m_tasks,
+                             total=total))
+
+    records = {p["name"]: {"id":p["name"],"n":p["n"]} for p in problems}
+
+    def _obj(T, p):
+        """Compute comparable objective: QAP obj (simple) or GW obj (varied)."""
+        if mode == "simple":
+            perm = round_to_perm(T)
+            return compute_qap_obj(p["F"], p["D"], perm)
+        else:
+            m = p["m_tasks"]
+            return compute_gw_obj(T[:,:m]*p["total"], p["C1"], p["C2a"][:m,:m])
+
+    # ════════════════════════════════════
+    # PHASE 1 — Approximate methods
+    # ════════════════════════════════════
+    print(f"\n{'='*62}")
+    print(f"  PHASE 1 — Approximate Methods  [{mode.upper()} mode]")
+    print(f"{'='*62}")
+
+    for p in problems:
+        name = p["name"]
+        C1, C2a, Ma = p["C1"], p["C2a"], p["Ma"]
+        mu_n, nu_n  = p["mu_n"], p["nu_n"]
+        rec = records[name]
+        print(f"\n  {name}  (n={p['n']})")
+
+        # GW Default
+        t0=time.time(); T=gw_default(C1,C2a,mu_n,nu_n); dt=time.time()-t0
+        rec["GW_Default"]=_obj(T,p); rec["t_GW_Default"]=dt
+
+        # GW MultiInit
+        t0=time.time(); T=gw_multi_init(C1,C2a,mu_n,nu_n,n_trials=n_gw_trials)
+        rec["GW_MultiInit"]=_obj(T,p); rec["t_GW_MultiInit"]=time.time()-t0
+
+        # EGW — normalise cost matrices so epsilon is always in a meaningful range
+        # Raw costs (e.g. tai instances) can be ~millions; eps=0.3 would give
+        # exp(-1e6/0.3)=0 making Sinkhorn collapse. Normalising to [0,1] fixes this.
+        _scale = max(float(C1.max()), float(C2a.max()), 1e-12)
+        C1_n  = C1  / _scale
+        C2a_n = C2a / _scale
+        for eps in epsilons:
+            t0=time.time()
+            try:
+                Te=ot.gromov.entropic_gromov_wasserstein(
+                    C1_n, C2a_n, mu_n, nu_n, loss_fun="square_loss",
+                    epsilon=eps, max_iter=2000, tol=1e-9)
+                # Evaluate on ORIGINAL (un-normalised) costs for fair comparison
+                obj=_obj(Te, p)
+                if np.isnan(obj) or np.isinf(obj) or obj < 0:
+                    obj = float("inf")
+            except Exception:
+                obj = float("inf")
+            rec[f"EGW_{eps}"]=obj; rec[f"t_EGW_{eps}"]=time.time()-t0
+
+        # FGW — also normalise costs for numerical stability
+        _scale_fgw = max(float(C1.max()), float(C2a.max()), float(Ma.max()), 1e-12)
+        C1_fn  = C1  / _scale_fgw
+        C2a_fn = C2a / _scale_fgw
+        Ma_fn  = Ma  / _scale_fgw
+        for alpha in alphas:
+            t0=time.time()
+            try:
+                Tf,_=ot.gromov.fused_gromov_wasserstein(
+                    Ma_fn, C1_fn, C2a_fn, mu_n, nu_n,
+                    loss_fun="square_loss", alpha=alpha, log=True)
+                obj=_obj(Tf, p)
+                if np.isnan(obj) or np.isinf(obj) or obj < 0:
+                    obj = float("inf")
+            except Exception:
+                obj = float("inf")
+            rec[f"FGW_{alpha}"]=obj; rec[f"t_FGW_{alpha}"]=time.time()-t0
+
+        # GA
+        t0=time.time()
+        try:
+            Tga=genetic_algorithm(C1,C2a,mu_n,nu_n,pop_size=80,generations=300)
+            obj=_obj(Tga,p)
+        except Exception: obj=float("inf")
+        rec["GA"]=obj; rec["t_GA"]=time.time()-t0
+
+        # Print row
+        ref = KNOWN_BEST.get(name) if mode=="simple" else None
+        for key in APPROX_METHODS:
+            v=rec.get(key,float("inf")); t=rec.get(f"t_{key}",0)
+            if v < float("inf"):
+                gap = f"  gap={((v/ref)-1)*100:+.1f}%" if ref else ""
+                print(f"    {key:<18}: {v:14.3f}  ({t:.2f}s){gap}")
+
+    # ════════════════════════════════════
+    # PHASE 2 — Exact solver
+    # ════════════════════════════════════
+    print(f"\n{'='*62}")
+    print(f"  PHASE 2 — Exact Solver  "
+          f"(limit = {exact_time_limit/3600:.1f}h per instance)")
+    print(f"  Once one instance hits the limit, all remaining → NA")
+    print(f"{'='*62}")
+
+    exact_disabled = False
+
+    for p in problems:
+        name = p["name"]
+        rec  = records[name]
+
+        if exact_disabled:
+            rec["Exact"]=None; rec["t_Exact"]=None; rec["exact_opt"]=None
+            print(f"  {name} (n={p['n']}):  Exact = NA  (previous timeout)")
             continue
 
-    return best_P if best_P is not None else np.outer(mu_norm, nu_norm)
+        print(f"\n  {name} (n={p['n']}):  running Exact … ", end="", flush=True)
 
+        if mode == "simple":
+            obj, elapsed, is_opt = solve_exact_qap(
+                p["n"], p["F"], p["D"], time_limit=exact_time_limit)
+        else:
+            obj, elapsed, is_opt = solve_exact_cqap(
+                p["mu"], p["nu"], p["C1"], p["C2a"][:p["m_tasks"],:p["m_tasks"]],
+                time_limit=exact_time_limit)
+
+        status = "[OPTIMAL]" if is_opt else "[TIME LIMIT]" if elapsed>=exact_time_limit*0.98 else "[FEASIBLE]"
+        print(f"done  {elapsed:.1f}s  "
+              + (f"obj={obj:.3f}  {status}" if obj is not None else f"obj=NA  {status}"))
+
+        rec["Exact"]=obj; rec["t_Exact"]=elapsed; rec["exact_opt"]=is_opt
+
+        if elapsed >= exact_time_limit * 0.98 or obj is None:
+            exact_disabled = True
+            print(f"  ⚠  Time limit reached — all larger instances will be NA.")
+
+    return list(records.values())
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 7. Results display & CSV
+# ════════════════════════════════════════════════════════════════════════════
+
+def _gap(obj, ref):
+    if (ref and ref>0 and ref<float("inf")
+            and obj and obj<float("inf")):
+        return (obj/ref-1)*100
+    return None
+
+
+def print_results_table(records, mode, epsilons, alphas):
+    approx = (["GW_Default","GW_MultiInit"]
+              + [f"EGW_{e}" for e in epsilons]
+              + [f"FGW_{a}" for a in alphas]
+              + ["GA"])
+    all_keys = approx + ["Exact"]
+
+    def ref(rec):
+        return (KNOWN_BEST.get(rec["id"]) if mode=="simple"
+                else rec.get("Exact"))
+
+    print(f"\n{'─'*80}")
+    print(f"  RESULTS SUMMARY  [{mode.upper()} mode]")
+    print(f"{'─'*80}")
+
+    hdr = f"{'Instance':<12} {'n':>3}  "
+    for k in all_keys:
+        hdr += f"  {LABELS.get(k,k):>14}"
+        if k != "Exact": hdr += f"  {'gap%':>5}"
+    print(hdr)
+    print("─"*min(len(hdr)+20, 200))
+
+    for rec in records:
+        r = ref(rec)
+        row = f"{rec['id']:<12} {rec['n']:>3}  "
+        for k in all_keys:
+            v   = rec.get(k)
+            g   = _gap(v, r)
+            row += f"  {v:>14.1f}" if (v and v<float("inf")) else f"  {'NA':>14}"
+            if k != "Exact":
+                row += f"  {g:>5.1f}" if g is not None else f"  {'—':>5}"
+        print(row)
+
+    print(f"\n  Average gap (approximate methods vs reference):")
+    for k in approx:
+        gaps = [_gap(r.get(k), ref(r)) for r in records]
+        gaps = [g for g in gaps if g is not None]
+        if gaps:
+            print(f"    {LABELS.get(k,k):<22}: {np.mean(gaps):+.2f}%")
+
+
+def records_to_df(records, mode, epsilons, alphas):
+    all_keys = (["GW_Default","GW_MultiInit"]
+                + [f"EGW_{e}" for e in epsilons]
+                + [f"FGW_{a}" for a in alphas]
+                + ["GA","Exact"])
+    def ref(rec):
+        return (KNOWN_BEST.get(rec["id"]) if mode=="simple" else rec.get("Exact"))
+    rows = []
+    for r in records:
+        row = {"id":r["id"],"n":r["n"],"mode":mode}
+        for k in all_keys:
+            v = r.get(k)
+            row[k] = v
+            row[f"t_{k}"] = r.get(f"t_{k}")
+            row[f"gap_{k}"] = _gap(v, ref(r))
+        row["exact_optimal"] = r.get("exact_opt")
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 8. Figures
+# ════════════════════════════════════════════════════════════════════════════
+
+def _savefig(fig, path):
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {path}")
+
+
+def generate_figures(records, mode, epsilons, alphas, out_dir="results"):
+    os.makedirs(out_dir, exist_ok=True)
+    approx = (["GW_Default","GW_MultiInit"]
+              + [f"EGW_{e}" for e in epsilons]
+              + [f"FGW_{a}" for a in alphas]
+              + ["GA"])
+
+    def ref(rec):
+        return (KNOWN_BEST.get(rec["id"]) if mode=="simple" else rec.get("Exact"))
+
+    names = [r["id"] for r in records]
+    x     = np.arange(len(names))
+
+    # Fig 1: Objective comparison
+    fig, ax = plt.subplots(figsize=(14, 5))
+    plot_keys = ["GW_MultiInit","GW_Default","EGW_0.5","FGW_0.7","GA","Exact"]
+    lstyles   = ["--","-.",":","-.",":","--"]
+    markers   = ["s","^","v","P","D","o"]
+    for key, ls, mk in zip(plot_keys, lstyles, markers):
+        vals = [r.get(key) for r in records]
+        pts  = [(i,v) for i,v in enumerate(vals) if v and v<float("inf")]
+        if not pts: continue
+        xi, yi = zip(*pts)
+        ax.plot(list(xi), list(yi), label=LABELS.get(key,key),
+                color=PALETTE.get(key,"gray"), ls=ls, marker=mk, lw=2, ms=7)
+    if mode == "simple":
+        bk = [KNOWN_BEST.get(r["id"]) for r in records]
+        pts = [(i,v) for i,v in enumerate(bk) if v]
+        if pts: xi,yi=zip(*pts); ax.plot(list(xi),list(yi),"k*-",ms=10,lw=2,label="Best Known")
+    ax.set_xticks(x); ax.set_xticklabels(names, rotation=25, ha="right", fontsize=9)
+    ax.set_ylabel("Objective Value"); ax.legend(bbox_to_anchor=(1.01,1), loc="upper left", fontsize=9)
+    ax.set_title(f"Objective Comparison — {'QAPLIB' if mode=='simple' else 'QAPLIB-CQAP'} Instances",
+                 fontsize=13, fontweight="bold")
+    _savefig(fig, os.path.join(out_dir, "fig1_objective.png"))
+
+    # Fig 2: Optimality gap bar
+    valid = [r for r in records if ref(r) and ref(r)<float("inf")]
+    if valid:
+        ids2 = [r["id"] for r in valid]; x2 = np.arange(len(ids2))
+        w    = 0.7/len(approx)
+        offs = np.linspace(-(len(approx)-1)/2, (len(approx)-1)/2, len(approx))*w
+        fig, ax = plt.subplots(figsize=(14, 5))
+        for off, key in zip(offs, approx):
+            gaps = [_gap(r.get(key), ref(r)) or 0 for r in valid]
+            ax.bar(x2+off, gaps, w, label=LABELS.get(key,key),
+                   color=PALETTE.get(key,"gray"), alpha=0.85, edgecolor="white")
+        ax.set_xticks(x2); ax.set_xticklabels(ids2, fontsize=9)
+        ax.set_ylabel("Gap from Reference (%)"); ax.legend(bbox_to_anchor=(1.01,1), loc="upper left", fontsize=9)
+        ax.set_title("Optimality Gap from Reference", fontsize=13, fontweight="bold")
+        _savefig(fig, os.path.join(out_dir, "fig2_gap.png"))
+
+    # Fig 3: Runtime scalability
+    sizes = [r["n"] for r in records]
+    fig, ax = plt.subplots(figsize=(11, 5))
+    for key in approx + ["Exact"]:
+        ts = [r.get(f"t_{key}") for r in records]
+        xi = [s for s,t in zip(sizes,ts) if t and t<float("inf")]
+        yi = [t for t in ts if t and t<float("inf")]
+        if xi:
+            ax.plot(xi, yi, label=LABELS.get(key,key),
+                    color=PALETTE.get(key,"gray"), marker="o", lw=2, ms=5)
+    ax.set_yscale("log"); ax.set_xlabel("Problem size n"); ax.set_ylabel("Runtime (s, log)")
+    ax.set_title("Runtime Scalability", fontsize=13, fontweight="bold"); ax.legend(fontsize=8)
+    _savefig(fig, os.path.join(out_dir, "fig3_scalability.png"))
+
+    # Fig 4: Quality-time trade-off
+    valid_tr = [r for r in records if ref(r) and ref(r)<float("inf")]
+    if valid_tr:
+        avg_gap, avg_time = {}, {}
+        for key in approx:
+            gaps  = [_gap(r.get(key), ref(r)) for r in valid_tr]
+            times = [r.get(f"t_{key}") for r in valid_tr]
+            gf = [g for g in gaps if g is not None]; tf = [t for t in times if t]
+            if gf and tf: avg_gap[key]=np.mean(gf); avg_time[key]=np.mean(tf)
+        if avg_gap:
+            fig, ax = plt.subplots(figsize=(9, 6))
+            for key in avg_gap:
+                ax.scatter(avg_time[key], avg_gap[key], color=PALETTE.get(key,"gray"),
+                           s=160, zorder=5, edgecolors="white", lw=1.5)
+                ax.annotate(LABELS.get(key,key), (avg_time[key], avg_gap[key]),
+                            xytext=(7,5), textcoords="offset points", fontsize=9)
+            ax.set_xscale("log"); ax.set_xlabel("Avg Runtime (s, log)"); ax.set_ylabel("Avg Gap (%)")
+            ax.set_title("Solution Quality vs Computational Time", fontsize=12, fontweight="bold")
+            _savefig(fig, os.path.join(out_dir, "fig4_quality_time.png"))
+
+    # Fig 5: Summary heatmap
+    valid_hm = [r for r in records if ref(r) and ref(r)<float("inf")]
+    if valid_hm:
+        ids_hm = [r["id"] for r in valid_hm]
+        mat    = np.array([[_gap(r.get(k), ref(r)) or 0 for r in valid_hm] for k in approx])
+        fig, ax = plt.subplots(figsize=(max(8,len(ids_hm)*1.1+2), len(approx)*0.6+2))
+        im = ax.imshow(mat, cmap="RdYlGn_r", aspect="auto", vmin=0, vmax=np.nanmax(mat))
+        ax.set_xticks(range(len(ids_hm))); ax.set_xticklabels(ids_hm, fontsize=9)
+        ax.set_yticks(range(len(approx))); ax.set_yticklabels([LABELS.get(k,k) for k in approx], fontsize=9)
+        for i in range(len(approx)):
+            for j in range(len(ids_hm)):
+                v = mat[i,j]
+                ax.text(j, i, f"{v:.1f}", ha="center", va="center", fontsize=8,
+                        color="black" if v < 15 else "white")
+        plt.colorbar(im, ax=ax, label="Gap from Reference (%)")
+        ax.set_title("Solution Quality Heatmap", fontsize=12, fontweight="bold")
+        _savefig(fig, os.path.join(out_dir, "fig5_heatmap.png"))
+
+    print(f"  ✓  All figures → {os.path.abspath(out_dir)}/")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 9. Interactive menu
+# ════════════════════════════════════════════════════════════════════════════
+
+def _ask(prompt, choices, default=None):
+    while True:
+        raw = input(prompt).strip().lower()
+        if not raw and default is not None:
+            return default
+        if raw in choices:
+            return raw
+        try:
+            idx = int(raw)-1
+            if 0 <= idx < len(choices):
+                return choices[idx]
+        except ValueError:
+            pass
+        print(f"  Please enter one of: {choices}")
+
+
+def interactive_menu():
+    """
+    CLI menu. Returns (mode, selected_names, params).
+    QAPLIB instances are ALWAYS downloaded automatically to ./qaplib_data/
+    """
+    print("\n" + "━"*62)
+    print("  GW-CQAP Benchmark  |  QAPLIB automatic benchmark runner")
+    print("━"*62)
+    print(textwrap.dedent("""
+    QAPLIB instances are downloaded automatically — no manual step needed.
+
+    Benchmark modes
+    ───────────────
+    [1]  Simple QAPLIB
+         Standard balanced QAP (permutation assignment).
+         GW plans → rounded to permutation → QAP objective.
+         Gap measured against QAPLIB best-known solutions.
+
+    [2]  Varied QAPLIB  →  CQAP
+         Same QAPLIB F,D + random integer capacity/demand constraints.
+         GW objective used directly (fractional transport plans).
+         Gap measured against Gurobi exact CQAP solver.
+    """))
+
+    mode_raw = _ask("Select mode [1/2, default=1]: ", ["1","2"], default="1")
+    mode     = "simple" if mode_raw == "1" else "varied"
+    print(f"  → Mode: {'Simple QAPLIB (QAP)' if mode=='simple' else 'Varied QAPLIB (CQAP)'}\n")
+
+    # Instance selection
+    print("  Available instances:")
+    for i, name in enumerate(CURATED_INSTANCES, 1):
+        n  = INSTANCE_N.get(name, "?")
+        bk = KNOWN_BEST.get(name, "?")
+        print(f"    [{i:2d}] {name:<10}  n={n:>3}  best_known={bk}")
+
+    print("\n  Selection options:")
+    print("    • Press Enter            → all instances with n ≤ 20")
+    print("    • n<=25  or  n<30        → size filter")
+    print("    • all                    → all 18 instances")
+    print("    • 1,3,7                  → comma-separated indices")
+    sel_raw = input("\n  Your selection: ").strip() or "n<=20"
+
+    if sel_raw.lower() == "all":
+        selected = list(CURATED_INSTANCES)
+    elif sel_raw.startswith("n<="):
+        limit    = int(sel_raw[3:])
+        selected = [n for n in CURATED_INSTANCES if INSTANCE_N.get(n,999) <= limit]
+    elif sel_raw.startswith("n<"):
+        limit    = int(sel_raw[2:])
+        selected = [n for n in CURATED_INSTANCES if INSTANCE_N.get(n,999) < limit]
+    else:
+        idxs     = [int(s.strip())-1 for s in sel_raw.split(",") if s.strip().isdigit()]
+        selected = [CURATED_INSTANCES[i] for i in idxs if 0 <= i < len(CURATED_INSTANCES)]
+    print(f"  → Selected ({len(selected)}): {selected}\n")
+
+    # Parameters
+    n_trials = int(input("  GWMultiInit restarts [default=10]: ").strip() or "10")
+    eps_raw  = input("  EGW epsilon values   [default=0.3,0.5,0.8]: ").strip() or "0.3,0.5,0.8"
+    epsilons = tuple(float(e) for e in eps_raw.split(","))
+    alp_raw  = input("  FGW alpha values     [default=0.3,0.5,0.7]: ").strip() or "0.3,0.5,0.7"
+    alphas   = tuple(float(a) for a in alp_raw.split(","))
+
+    capacity_seed = 42
+    if mode == "varied":
+        capacity_seed = int(input("  Capacity RNG seed    [default=42]: ").strip() or "42")
+
+    print("\n  Exact solver: 2h per-instance limit.")
+    print("  First instance that exceeds 2h → it and all larger get NA.\n")
+
+    params = dict(n_gw_trials=n_trials, epsilons=epsilons, alphas=alphas,
+                  exact_time_limit=7200, capacity_seed=capacity_seed)
+    return mode, selected, params
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 10. main
+# ════════════════════════════════════════════════════════════════════════════
 
 def main():
-    mu, nu, C1, C2, cross_distance = create_problem()
-    total_mass = mu.sum()
-    mu_norm = mu / total_mass
-    nu_norm = nu / total_mass
+    OUT = "results"
+    os.makedirs(OUT, exist_ok=True)
 
-    print(f"Problem: {len(mu)} agents, {len(nu)} tasks")
-    print(f"Total mass = {total_mass:.3f}")
+    # Interactive menu
+    mode, selected_names, params = interactive_menu()
 
-    results = {}
-    times = {}
+    # Auto-download all selected instances
+    available = download_instances(selected_names)
+    if not available:
+        print("\n  No instances available. Check your internet connection.")
+        print(f"  Or place .dat files manually in ./{QAPLIB_DATA_DIR}/")
+        sys.exit(1)
 
-    # Original GW with default parameters
-    start = time.time()
-    P_gw = ot.gromov.gromov_wasserstein(C1, C2, mu_norm, nu_norm, loss_fun='square_loss')
-    P_gw_scaled = P_gw * total_mass
-    obj_gw = compute_objective(P_gw_scaled, C1, C2)
-    times['GW_Default'] = time.time() - start
-    results['GW_Default'] = obj_gw
+    # Run two-phase benchmark
+    records = run_benchmark(available, mode, **params)
 
-    # GW with multiple random initializations
-    start = time.time()
-    P_gw_multi = gw_multi_init(C1, C2, mu_norm, nu_norm, n_trials=15)
-    P_gw_multi_scaled = P_gw_multi * total_mass
-    obj_gw_multi = compute_objective(P_gw_multi_scaled, C1, C2)
-    times['GW_MultiInit'] = time.time() - start
-    results['GW_MultiInit'] = obj_gw_multi
+    # Print results
+    print_results_table(records, mode, params["epsilons"], params["alphas"])
 
-    # Fixed Genetic Algorithm
-    print("\nRunning Fixed GA:")
-    start = time.time()
-    P_ga = genetic_algorithm_ot_fixed(C1, C2, mu_norm, nu_norm, pop_size=80, generations=300,
-                                      crossover_rate=0.8, mutation_rate=0.2, verbose=True)
-    P_ga_scaled = P_ga * total_mass
-    obj_ga = compute_objective(P_ga_scaled, C1, C2)
-    times['GA_Fixed'] = time.time() - start
-    results['GA_Fixed'] = obj_ga
+    # Save CSV
+    df       = records_to_df(records, mode, params["epsilons"], params["alphas"])
+    csv_path = os.path.join(OUT, f"results_{mode}.csv")
+    df.to_csv(csv_path, index=False)
+    print(f"\n  Results CSV → {csv_path}")
 
-    # EGW with different epsilons (only a few key ones to save time)
-    epsilons = [1, 0.9, 0.8, 0.7, 0.6, 0.5, 0.3]
-    for eps in epsilons:
-        start = time.time()
-        try:
-            P_egw = ot.gromov.entropic_gromov_wasserstein(C1, C2, mu_norm, nu_norm,
-                                                          loss_fun='square_loss', epsilon=eps,
-                                                          max_iter=2000, tol=1e-12)
-            P_egw_scaled = P_egw * total_mass
-            obj_egw = compute_objective(P_egw_scaled, C1, C2)
-
-            # Check if solution is valid
-            if np.isnan(obj_egw) or obj_egw <= 0:
-                print(f"EGW failed for epsilon={eps} (invalid objective)")
-                obj_egw = float('inf')
-
-            times[f'EGW_{eps}'] = time.time() - start
-            results[f'EGW_{eps}'] = obj_egw
-        except Exception as e:
-            print(f"EGW failed for epsilon={eps}: {e}")
-            times[f'EGW_{eps}'] = time.time() - start
-            results[f'EGW_{eps}'] = float('inf')
-
-    # Fused Gromov-Wasserstein with different alpha values
-    alphas = [0.0, 0.3, 0.5, 0.7, 1.0]
-    print(f"\n   Alpha analysis:")
-
-    for alpha in alphas:
-        start = time.time()
-        try:
-            T_fgw, log_fgw = ot.gromov.fused_gromov_wasserstein(
-                cross_distance, C1, C2,
-                mu_norm, nu_norm,
-                loss_fun='square_loss', alpha=alpha, log=True
-            )
-            P_fgw_scaled = T_fgw * total_mass
-            obj_fgw = compute_objective(P_fgw_scaled, C1, C2)
-
-            times[f'FGW_{alpha}'] = time.time() - start
-            results[f'FGW_{alpha}'] = obj_fgw
-
-            print(f"   Alpha {alpha}: objective = {obj_fgw:.6f}, iterations = {log_fgw.get('n_iter', 'N/A')}")
-
-        except Exception as e:
-            print(f"FGW failed for alpha={alpha}: {e}")
-            times[f'FGW_{alpha}'] = time.time() - start
-            results[f'FGW_{alpha}'] = float('inf')
-
-    # Exact
-    start = time.time()
-    P_exact, obj_exact = solve_exact(mu, nu, C1, C2)
-    times['Exact'] = time.time() - start
-    results['Exact'] = obj_exact
-
-    print("\nResults:")
-    for method, obj in results.items():
-        t = times[method]
-        print(f"{method:14}: {obj:.6f} ({t:.3f}s)")
-
-    best_obj = min(results.values())
-    best_method = min(results.items(), key=lambda x: x[1])[0]
-
-    print(f"\nBest method: {best_method} with objective {best_obj:.6f}")
-    print(f"\nGaps from best:")
-    for method, obj in results.items():
-        gap = ((obj / best_obj) - 1) * 100 if best_obj > 0 else float('inf')
-        t = times[method]
-        print(f"{method:14}: {gap:.2f}% ({t:.3f}s)")
+    # Generate figures
+    generate_figures(records, mode, params["epsilons"], params["alphas"], out_dir=OUT)
+    print("\nDone.  All outputs in results/\n")
 
 
 if __name__ == "__main__":
